@@ -20,7 +20,8 @@
 #include<linux/sysfs.h> 
 #include<linux/kobject.h> 
 #include <linux/err.h>
- 
+#include <linux/version.h>
+
 volatile int etx_value = 0;
  
  
@@ -142,13 +143,20 @@ static int __init etx_driver_init(void)
             pr_info("Cannot add the device to the system\n");
             goto r_class;
         }
- 
+
         /*Creating struct class*/
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
         if(IS_ERR(dev_class = class_create(THIS_MODULE,"etx_class"))){
             pr_info("Cannot create the struct class\n");
             goto r_class;
         }
- 
+#else
+        if(IS_ERR(dev_class = class_create("etx_class"))){
+            pr_info("Cannot create the struct class\n");
+            goto r_class;
+        }
+#endif
+
         /*Creating device*/
         if(IS_ERR(device_create(dev_class,NULL,dev,NULL,"etx_device"))){
             pr_info("Cannot create the Device 1\n");
