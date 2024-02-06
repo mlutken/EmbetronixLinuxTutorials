@@ -23,7 +23,13 @@
 #include <linux/version.h>
 #include <linux/semaphore.h>
 #include <linux/wait.h>
+#include <linux/sched.h>
 
+/**
+ *
+ * @see https://www.oreilly.com/library/view/linux-device-drivers/0596000081/ch05s02.html
+ *
+*/
 volatile int etx_value = 0;
 
 
@@ -32,18 +38,26 @@ static struct class *dev_class;
 static struct cdev etx_cdev;
 struct kobject *kobj_ref;
 
-struct my_data {
-    int value;
-    struct semaphore sem;
-    wait_queue_head_t wq;
-};
+// struct my_data {
+//     unsigned int value;
+//     struct semaphore sem;
+//     wait_queue_head_t wq;
+// };
 
-static struct my_data my_instance = {
-    .value = 33,
-    .sem = __SEMAPHORE_INITIALIZER(my_instance.sem, 0),
-    .wq = __WAIT_QUEUE_HEAD_INITIALIZER(my_instance.wq),
-};
+// static struct my_data my_instance = {
+//     .value = 33,
+//     .sem = __SEMAPHORE_INITIALIZER(my_instance.sem, 0),
+//     .wq = __WAIT_QUEUE_HEAD_INITIALIZER(my_instance.wq),
+// };
 
+u32 etx_attr_value = 55;
+DECLARE_WAIT_QUEUE_HEAD(etx_attr_wq);
+atomic_t ext_attr_data_available = ATOMIC_INIT(0);
+
+
+u32 notify_attribute_value = 22;
+// DECLARE_WAIT_QUEUE_HEAD(notify_attribute_wq);
+// atomic_t notify_attribute_data_available = ATOMIC_INIT(0);
 
 /*
 ** Function Prototypes
@@ -65,7 +79,14 @@ static ssize_t  sysfs_show(struct kobject *kobj,
 static ssize_t  sysfs_store(struct kobject *kobj,
                            struct kobj_attribute *attr,const char *buf, size_t count);
 
+
+static ssize_t  notify_attribute_show(struct kobject *kobj,
+                          struct kobj_attribute *attr, char *buf);
+static ssize_t  notify_attribute_store(struct kobject *kobj,
+                           struct kobj_attribute *attr,const char *buf, size_t count);
+
 struct kobj_attribute etx_attr = __ATTR(etx_value, 0660, sysfs_show, sysfs_store);
+struct kobj_attribute notify_attribute_attr = __ATTR(notify_attribute, 0660, notify_attribute_show, notify_attribute_store);
 
 /*
 ** File operation sturcture
@@ -85,15 +106,9 @@ static struct file_operations fops =
 static ssize_t sysfs_show(struct kobject *kobj,
                           struct kobj_attribute *attr, char *buf)
 {
-    // Block until the interrupt occurs
-    if (down_interruptible(&(my_instance.sem))) {
-        return -ERESTARTSYS;  // interrupted by a signal
-    }
-
-    return sprintf(buf, "%d\n", my_instance.value);
-
-    // pr_info("Sysfs - Read!!!\n");
-    // return sprintf(buf, "%d", etx_value);
+    atomic_inc(&ext_attr_data_available);
+    wait_event_interruptible(etx_attr_wq, atomic_read(&ext_attr_data_available) == 0);
+    return sprintf(buf, "%u\n", etx_attr_value);
 }
 
 /*
@@ -102,18 +117,38 @@ static ssize_t sysfs_show(struct kobject *kobj,
 static ssize_t sysfs_store(struct kobject *kobj,
                            struct kobj_attribute *attr,const char *buf, size_t count)
 {
-    sscanf(buf, "%d", &(my_instance.value));
+    sscanf(buf, "%u", &(etx_attr_value));
 
-    // Unblock any waiting processes
-    up(&(my_instance.sem));
-    wake_up_interruptible(&(my_instance.wq));
+    atomic_set(&ext_attr_data_available, 0);
+    wake_up_interruptible(&etx_attr_wq);
 
     return count;
-
-    // pr_info("Sysfs - Write!!!\n");
-    // sscanf(buf,"%d",&etx_value);
-    // return count;
 }
+
+
+/*
+** This function will be called when we read the sysfs file
+*/
+static ssize_t notify_attribute_show(struct kobject *kobj,
+                                     struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%u\n", notify_attribute_value);
+}
+
+/*
+** This function will be called when we write the sysfsfs file
+*/
+static ssize_t notify_attribute_store(struct kobject *kobj,
+                                      struct kobj_attribute *attr,const char *buf, size_t count)
+{
+    sscanf(buf, "%u", &notify_attribute_value);
+
+    // Notify the sysfs attribute that the task has completed
+    sysfs_notify(kobj, NULL, "notify_attribute");
+
+    return count;
+}
+
 
 /*
 ** This function will be called when we open the Device file
@@ -202,12 +237,20 @@ static int __init etx_driver_init(void)
         pr_err("Cannot create sysfs file......\n");
         goto r_sysfs;
     }
+
+    // Creating the notify_attribute_attr attribute
+    if(sysfs_create_file(kobj_ref,&notify_attribute_attr.attr)){
+        pr_err("Cannot create sysfs file......\n");
+        goto r_sysfs;
+    }
+
     pr_info("Device Driver Insert...Done!!!\n");
     return 0;
 
 r_sysfs:
     kobject_put(kobj_ref);
     sysfs_remove_file(kernel_kobj, &etx_attr.attr);
+    sysfs_remove_file(kernel_kobj, &notify_attribute_attr.attr);
 
 r_device:
     class_destroy(dev_class);
@@ -224,6 +267,7 @@ static void __exit etx_driver_exit(void)
 {
     kobject_put(kobj_ref);
     sysfs_remove_file(kernel_kobj, &etx_attr.attr);
+    sysfs_remove_file(kernel_kobj, &notify_attribute_attr.attr);
     device_destroy(dev_class,dev);
     class_destroy(dev_class);
     cdev_del(&etx_cdev);
